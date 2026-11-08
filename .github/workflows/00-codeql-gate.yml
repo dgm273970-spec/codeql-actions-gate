@@ -1,0 +1,54 @@
+name: CodeQL Actions Gate
+
+# Followup plan section 2: GitHub-hosted CodeQL comparison for the Effect-Aware
+# Cross-Workflow target property. Identical on both input branches; the only
+# difference between gate-vulnerable and gate-fixed is the sample under test
+# (actions/attest commit-dist.yml + rebuild-dist.yml at the recorded commits).
+
+on:
+  push:
+    branches:
+      - gate-vulnerable
+      - gate-fixed
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: actions
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+
+      # Evidence-only harness steps (identical on both input branches). They do not
+      # change the analysis: languages, query suite, action versions and the two
+      # analysed files are the same as the guide section 6.8 template. Purpose: the
+      # hosted uploader does not expose the uploaded SARIF for download with a
+      # fine-grained PAT (GET /code-scanning/sarifs/{id} returns only
+      # processing_status/analyses_url), and alerts are not created for branches
+      # outside the code-scanning monitored set, so the raw SARIF written by the
+      # analyze step is captured as a run artifact for plan section 2.3.
+      - name: Copy CodeQL SARIF into the workspace
+        run: |
+          mkdir -p sarif-evidence
+          cp -v "$(dirname "$GITHUB_WORKSPACE")/results/"*.sarif sarif-evidence/ || true
+          ls -l sarif-evidence
+      - name: Upload CodeQL SARIF for the gate record
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ github.ref_name }}
+          path: sarif-evidence/*.sarif
+          if-no-files-found: warn
