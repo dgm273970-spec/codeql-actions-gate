@@ -86,4 +86,4 @@ jobs:
           name: fork-pr-provenance
           path: evidence/pr-provenance.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
