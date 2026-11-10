@@ -1,0 +1,89 @@
+
+name: Fork Artifact Producer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  produce-evidence:
+    name: Produce Fork PR Provenance
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create PR provenance evidence
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_BASE_REPOSITORY_ID: ${{ github.event.pull_request.base.repo.id }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+
+        run: |
+          mkdir -p evidence
+
+          jq -n \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg repository_id "$GITHUB_REPOSITORY_ID" \
+            --arg workflow "$GITHUB_WORKFLOW" \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg pr_number "$PR_NUMBER" \
+            --arg head_repository "$PR_HEAD_REPOSITORY" \
+            --arg head_repository_id "$PR_HEAD_REPOSITORY_ID" \
+            --arg head_sha "$PR_HEAD_SHA" \
+            --arg head_ref "$PR_HEAD_REF" \
+            --arg base_repository "$PR_BASE_REPOSITORY" \
+            --arg base_repository_id "$PR_BASE_REPOSITORY_ID" \
+            --arg base_sha "$PR_BASE_SHA" \
+            --arg base_ref "$PR_BASE_REF" \
+            --arg pr_url "$PR_URL" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{
+              event_name: $event_name,
+              repository: $repository,
+              repository_id: $repository_id,
+              workflow: $workflow,
+              workflow_ref: $workflow_ref,
+              workflow_sha: $workflow_sha,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              actor: $actor,
+              pull_request: {
+                number: $pr_number,
+                head_repository: $head_repository,
+                head_repository_id: $head_repository_id,
+                head_sha: $head_sha,
+                head_ref: $head_ref,
+                base_repository: $base_repository,
+                base_repository_id: $base_repository_id,
+                base_sha: $base_sha,
+                base_ref: $base_ref,
+                url: $pr_url
+              },
+              run_url: $run_url
+            }' > evidence/pr-provenance.json
+
+          cat evidence/pr-provenance.json
+
+      - name: Upload PR provenance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-pr-provenance
+          path: evidence/pr-provenance.json
+          if-no-files-found: error
+          retention-days: 7
