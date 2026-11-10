@@ -10,62 +10,225 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
+  pull-requests: read
 
 jobs:
   consume-fork-artifact:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Collect producer run and artifact API evidence
+      - name: Download artifact from exact producer run
+        uses: actions/download-artifact@v4
+        with:
+          name: fork-pr-provenance
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: evidence
+
+      - name: Collect producer run and PR API evidence
         uses: actions/github-script@v7
+        env:
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
         with:
           script: |
             const fs = require("fs");
-            const { owner, repo } = context.repo;
-            const eventRun = context.payload.workflow_run;
 
-            if (!eventRun || !eventRun.id) {
-              throw new Error("Missing workflow_run event");
+            const { owner, repo } = context.repo;
+            const producerRunId = Number(process.env.PRODUCER_RUN_ID);
+
+            const artifactPath = "evidence/pr-provenance.json";
+
+            if (!fs.existsSync(artifactPath)) {
+              throw new Error("Downloaded provenance JSON is missing");
             }
 
-            const runResponse = await github.rest.actions.getWorkflowRun({
-              owner,
-              repo,
-              run_id: eventRun.id
-            });
+            const producer = JSON.parse(
+              fs.readFileSync(artifactPath, "utf8")
+            );
+
+            if (producer.event_name !== "pull_request") {
+              throw new Error("Artifact event_name is not pull_request");
+            }
+
+            if (Number(producer.run_id) !== producerRunId) {
+              throw new Error("Artifact producer Run ID mismatch");
+            }
+
+            const sourcePR = producer.pull_request || {};
+            const prNumber = Number(sourcePR.number);
+
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              throw new Error("Invalid PR number in provenance artifact");
+            }
+
+            if (
+              !sourcePR.head_repository ||
+              !sourcePR.head_repository_id ||
+              !sourcePR.head_sha ||
+              !sourcePR.head_ref ||
+              !sourcePR.base_repository ||
+              !sourcePR.base_repository_id ||
+              !sourcePR.base_ref
+            ) {
+              throw new Error("Incomplete PR provenance fields");
+            }
+
+            // Obtain authoritative producer run information.
+            const runResponse =
+              await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: producerRunId
+              });
+
             const run = runResponse.data;
+
+            if (Number(run.id) !== producerRunId) {
+              throw new Error("GitHub producer Run ID mismatch");
+            }
 
             if (run.event !== "pull_request") {
               throw new Error("Producer run is not a pull_request event");
             }
 
+            if (run.conclusion !== "success") {
+              throw new Error("Producer run did not succeed");
+            }
+
             const base = run.repository || {};
             const fork = run.head_repository || {};
 
-            if (!base.id || !fork.id || Number(base.id) === Number(fork.id)) {
+            if (!base.id || !fork.id) {
+              throw new Error("Missing producer repository identity");
+            }
+
+            if (Number(base.id) === Number(fork.id)) {
               throw new Error("A distinct Fork repository is required");
             }
 
-            const prs = run.pull_requests || [];
-            const pr = prs[0];
-
-            if (!pr || !pr.number || !pr.head ||
-                !pr.head.sha || !pr.head.ref) {
-              throw new Error("Cannot obtain PR head provenance");
+            if (Number(base.id) !== Number(producer.repository_id)) {
+              throw new Error("Base repository ID mismatch");
             }
 
+            if (
+              Number(fork.id) !== Number(sourcePR.head_repository_id)
+            ) {
+              throw new Error("Fork repository ID mismatch");
+            }
+
+            if (base.full_name !== sourcePR.base_repository) {
+              throw new Error("Base repository name mismatch");
+            }
+
+            if (fork.full_name !== sourcePR.head_repository) {
+              throw new Error("Fork repository name mismatch");
+            }
+
+            if (run.head_branch !== sourcePR.head_ref) {
+              throw new Error("Producer head branch mismatch");
+            }
+
+            if (
+              Number(run.run_attempt) !== Number(producer.run_attempt)
+            ) {
+              throw new Error("Producer run attempt mismatch");
+            }
+
+            // Use the artifact PR number only as a lookup candidate.
+            // The actual PR identity and fields must be verified via API.
+            const prResponse = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+
+            const pr = prResponse.data;
+
+            if (Number(pr.number) !== prNumber) {
+              throw new Error("GitHub PR number mismatch");
+            }
+
+            if (!pr.head || !pr.head.repo || !pr.base || !pr.base.repo) {
+              throw new Error("PR head or base repository is unavailable");
+            }
+
+            if (
+              Number(pr.head.repo.id) !== Number(sourcePR.head_repository_id)
+            ) {
+              throw new Error("PR head repository ID mismatch");
+            }
+
+            if (
+              Number(pr.base.repo.id) !== Number(sourcePR.base_repository_id)
+            ) {
+              throw new Error("PR base repository ID mismatch");
+            }
+
+            if (pr.head.repo.full_name !== sourcePR.head_repository) {
+              throw new Error("PR head repository name mismatch");
+            }
+
+            if (pr.base.repo.full_name !== sourcePR.base_repository) {
+              throw new Error("PR base repository name mismatch");
+            }
+
+            if (pr.head.sha !== sourcePR.head_sha) {
+              throw new Error("PR head SHA mismatch");
+            }
+
+            if (pr.head.ref !== sourcePR.head_ref) {
+              throw new Error("PR head branch mismatch");
+            }
+
+            if (pr.base.ref !== sourcePR.base_ref) {
+              throw new Error("PR base branch mismatch");
+            }
+
+            if (pr.html_url !== sourcePR.url) {
+              throw new Error("PR URL mismatch");
+            }
+
+            // If the workflow run API provides PR associations,
+            // independently check the association as well.
+            const associatedPRs = run.pull_requests || [];
+
+            if (associatedPRs.length > 0) {
+              const associatedPR = associatedPRs.find(
+                item => Number(item.number) === prNumber
+              );
+
+              if (!associatedPR) {
+                throw new Error(
+                  "Producer run PR association does not match artifact"
+                );
+              }
+
+              if (
+                associatedPR.head &&
+                associatedPR.head.sha &&
+                associatedPR.head.sha !== sourcePR.head_sha
+              ) {
+                throw new Error(
+                  "Workflow run PR association head SHA mismatch"
+                );
+              }
+            }
+
+            // Verify the artifact belongs to this exact producer run.
             const artifactResponse =
               await github.rest.actions.listWorkflowRunArtifacts({
                 owner,
                 repo,
-                run_id: run.id,
+                run_id: producerRunId,
                 per_page: 100
               });
 
             const matches = artifactResponse.data.artifacts.filter(
-              a => a.name === "fork-pr-provenance" && !a.expired
+              artifact =>
+                artifact.name === "fork-pr-provenance" &&
+                !artifact.expired
             );
 
             if (matches.length !== 1) {
@@ -94,7 +257,7 @@ jobs:
                   owner,
                   repo,
                   path: workflow.path,
-                  ref: run.head_sha
+                  ref: producer.workflow_sha
                 });
 
               const content = contentResponse.data;
@@ -105,14 +268,16 @@ jobs:
 
               workflowBlobSha = content.sha;
             } catch (error) {
-              workflowBlobError = String(error.message || error).slice(0, 300);
+              workflowBlobError = String(
+                error.message || error
+              ).slice(0, 300);
             }
 
             const jobsResponse =
               await github.rest.actions.listJobsForWorkflowRun({
                 owner,
                 repo,
-                run_id: run.id,
+                run_id: producerRunId,
                 per_page: 100
               });
 
@@ -128,6 +293,12 @@ jobs:
                 }))
             );
 
+            if (
+              !uploadSteps.some(step => step.conclusion === "success")
+            ) {
+              throw new Error("No successful artifact upload step found");
+            }
+
             const metadata = {
               base_repository: {
                 id: base.id,
@@ -139,9 +310,15 @@ jobs:
               },
               pull_request: {
                 number: pr.number,
+                state: pr.state,
+                url: pr.html_url,
                 head_sha: pr.head.sha,
                 head_branch: pr.head.ref,
-                head_repository_id: pr.head.repo ? pr.head.repo.id : null
+                head_repository_id: pr.head.repo.id,
+                head_repository: pr.head.repo.full_name,
+                base_branch: pr.base.ref,
+                base_repository_id: pr.base.repo.id,
+                base_repository: pr.base.repo.full_name
               },
               producer_run: {
                 id: run.id,
@@ -149,13 +326,15 @@ jobs:
                 conclusion: run.conclusion,
                 head_sha: run.head_sha,
                 head_branch: run.head_branch,
-                workflow_id: run.workflow_id
+                run_attempt: run.run_attempt,
+                workflow_id: run.workflow_id,
+                html_url: run.html_url
               },
               workflow: {
                 id: run.workflow_id,
                 path: workflow.path,
+                workflow_sha: producer.workflow_sha,
                 blob_sha: workflowBlobSha,
-                blob_sha_ref: run.head_sha,
                 blob_sha_error: workflowBlobError
               },
               artifact: {
@@ -168,28 +347,38 @@ jobs:
               upload_steps: uploadSteps,
               api_response_summary: {
                 workflow_run_status: runResponse.status,
+                pull_request_status: prResponse.status,
                 artifact_list_status: artifactResponse.status,
                 jobs_list_status: jobsResponse.status,
                 workflow_status: workflowResponse.status
+              },
+              checks: {
+                run_id_matches: true,
+                event_is_pull_request: true,
+                fork_repository_distinct: true,
+                base_repository_matches: true,
+                fork_repository_matches: true,
+                pr_number_matches: true,
+                pr_head_sha_matches: true,
+                pr_head_branch_matches: true,
+                pr_base_branch_matches: true,
+                pr_url_matches: true,
+                artifact_belongs_to_exact_run: true
               }
             };
 
-            fs.mkdirSync("consumer-evidence", { recursive: true });
+            fs.mkdirSync("consumer-evidence", {
+              recursive: true
+            });
 
             fs.writeFileSync(
               "consumer-evidence/api-metadata.json",
               JSON.stringify(metadata, null, 2)
             );
 
-            core.info("Producer API evidence collected.");
+            core.info("Producer run and PR API evidence collected.");
 
-      - name: Download artifact from exact producer run
-        uses: actions/download-artifact@v4
-        with:
-          name: fork-pr-provenance
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: evidence
+            core.info(JSON.stringify(metadata.checks, null, 2));
 
       - name: Validate provenance and record dry-run sink
         env:
@@ -217,27 +406,115 @@ jobs:
           pr = metadata["pull_request"]
           artifact = metadata["artifact"]
 
-          if int(payload["producer_run_id"]) != int(run["id"]):
-              raise RuntimeError("Producer Run ID mismatch")
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
 
-          if payload["head_sha"] != pr["head_sha"]:
-              raise RuntimeError("PR head SHA mismatch")
+          require(
+              payload["event_name"] == "pull_request",
+              "Producer event mismatch"
+          )
 
-          if payload["head_branch"] != pr["head_branch"]:
-              raise RuntimeError("PR head branch mismatch")
+          require(
+              int(payload["run_id"]) == int(run["id"]),
+              "Producer Run ID mismatch"
+          )
 
-          if payload["marker"] != "controlled-test-only":
-              raise RuntimeError("Unexpected provenance marker")
+          require(
+              int(payload["run_attempt"]) == int(run["run_attempt"]),
+              "Producer run attempt mismatch"
+          )
 
-          if not payload.get("test_case"):
-              raise RuntimeError("Missing test_case")
+          require(
+              int(payload["repository_id"]) ==
+              int(metadata["base_repository"]["id"]),
+              "Base repository ID mismatch"
+          )
 
-          if int(metadata["fork_repository"]["id"]) == int(
-              metadata["base_repository"]["id"]
-          ):
-              raise RuntimeError("Producer is not from a distinct Fork")
+          require(
+              payload["repository"] ==
+              metadata["base_repository"]["full_name"],
+              "Base repository name mismatch"
+          )
+
+          source_pr = payload["pull_request"]
+
+          require(
+              int(source_pr["number"]) == int(pr["number"]),
+              "PR number mismatch"
+          )
+
+          require(
+              int(source_pr["head_repository_id"]) ==
+              int(pr["head_repository_id"]),
+              "Fork repository ID mismatch"
+          )
+
+          require(
+              int(source_pr["base_repository_id"]) ==
+              int(pr["base_repository_id"]),
+              "Base repository ID mismatch"
+          )
+
+          require(
+              source_pr["head_repository"] == pr["head_repository"],
+              "Fork repository name mismatch"
+          )
+
+          require(
+              source_pr["base_repository"] == pr["base_repository"],
+              "Base repository name mismatch"
+          )
+
+          require(
+              source_pr["head_sha"] == pr["head_sha"],
+              "PR head SHA mismatch"
+          )
+
+          require(
+              source_pr["head_ref"] == pr["head_branch"],
+              "PR head branch mismatch"
+          )
+
+          require(
+              source_pr["base_ref"] == pr["base_branch"],
+              "PR base branch mismatch"
+          )
+
+          require(
+              source_pr["url"] == pr["url"],
+              "PR URL mismatch"
+          )
+
+          require(
+              int(metadata["fork_repository"]["id"]) !=
+              int(metadata["base_repository"]["id"]),
+              "Producer is not from a distinct Fork"
+          )
+
+          require(
+              artifact["name"] == "fork-pr-provenance",
+              "Unexpected artifact name"
+          )
 
           downloaded_sha256 = hashlib.sha256(raw).hexdigest()
+
+          checks = {
+              "event_is_pull_request": True,
+              "producer_run_id_matches": True,
+              "producer_run_attempt_matches": True,
+              "base_repository_id_matches": True,
+              "base_repository_name_matches": True,
+              "fork_repository_id_matches": True,
+              "fork_repository_name_matches": True,
+              "pr_number_matches": True,
+              "pr_head_sha_matches": True,
+              "pr_head_branch_matches": True,
+              "pr_base_branch_matches": True,
+              "pr_url_matches": True,
+              "artifact_json_parsed": True,
+              "artifact_belongs_to_exact_run": True
+          }
 
           summary = {
               "result": "PASS",
@@ -252,14 +529,7 @@ jobs:
                   "downloaded_json_sha256": downloaded_sha256
               },
               "upload_steps": metadata["upload_steps"],
-              "checks": {
-                  "fork_repository_distinct": True,
-                  "producer_run_id_matches": True,
-                  "pr_head_sha_matches": True,
-                  "pr_head_branch_matches": True,
-                  "controlled_marker_matches": True,
-                  "artifact_json_parsed": True
-              },
+              "checks": checks,
               "dry_run_sink": {
                   "repository": metadata["base_repository"]["full_name"],
                   "ref": (
@@ -278,8 +548,11 @@ jobs:
           print(json.dumps({
               "result": summary["result"],
               "producer_run_id": run["id"],
+              "consumer_run_id": summary["consumer_run_id"],
+              "pull_request_number": pr["number"],
               "artifact_id": artifact["id"],
               "downloaded_json_sha256": downloaded_sha256,
+              "checks": checks,
               "dry_run_sink": summary["dry_run_sink"]
           }, indent=2))
           PY
