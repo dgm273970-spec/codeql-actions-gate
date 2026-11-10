@@ -11,7 +11,7 @@ permissions:
 jobs:
   produce-evidence:
     name: Produce Fork PR Provenance
-    if: github.event.pull_request.head.repo.full_name != github.repository
+    if: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +30,8 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
 
         run: |
+          set -euo pipefail
+
           mkdir -p evidence
 
           jq -n \
@@ -40,12 +42,13 @@ jobs:
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
             --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
             --arg run_id "$GITHUB_RUN_ID" \
+            --arg head_sha "$PR_HEAD_SHA" \
+            --arg head_branch "$PR_HEAD_REF" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             --arg actor "$GITHUB_ACTOR" \
             --arg pr_number "$PR_NUMBER" \
             --arg head_repository "$PR_HEAD_REPOSITORY" \
             --arg head_repository_id "$PR_HEAD_REPOSITORY_ID" \
-            --arg head_sha "$PR_HEAD_SHA" \
             --arg head_ref "$PR_HEAD_REF" \
             --arg base_repository "$PR_BASE_REPOSITORY" \
             --arg base_repository_id "$PR_BASE_REPOSITORY_ID" \
@@ -61,6 +64,11 @@ jobs:
               workflow_ref: $workflow_ref,
               workflow_sha: $workflow_sha,
               run_id: $run_id,
+              producer_run_id: $run_id,
+              head_sha: $head_sha,
+              head_branch: $head_branch,
+              marker: "controlled-test-only",
+              test_case: "real_fork_pull_request",
               run_attempt: $run_attempt,
               actor: $actor,
               pull_request: {
@@ -78,7 +86,8 @@ jobs:
               run_url: $run_url
             }' > evidence/pr-provenance.json
 
-          cat evidence/pr-provenance.json
+          echo "Generated PR provenance evidence:"
+          jq . evidence/pr-provenance.json
 
       - name: Upload PR provenance artifact
         uses: actions/upload-artifact@v4
