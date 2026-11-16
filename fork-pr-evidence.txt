@@ -1,0 +1,6 @@
+Real Fork Pull Request Evidence Test
+
+Repository: dgm273970-fork/codeql-actions-gate
+Branch: fork-pr-evidence-001
+Purpose: Verify real GitHub fork pull_request workflow execution.
+Trigger second producer run after consumer fix.
