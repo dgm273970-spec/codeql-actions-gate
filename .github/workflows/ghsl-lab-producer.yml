@@ -32,7 +32,7 @@ jobs:
           PRODUCER_RUN_ID: ${{ github.run_id }}
           PRODUCER_RUN_ATTEMPT: ${{ github.run_attempt }}
           PRODUCER_WORKFLOW: GHSL Lab Producer
-          TARGET_REF: refs/heads/ghsl-lab-vuln-${{ github.run_id }}
+          TARGET_REF: refs/heads/lab-canary
         run: |
           set -euo pipefail
           mkdir -p dist dist-meta
