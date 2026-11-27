@@ -1,0 +1,2 @@
+same-repository fixed ALLOW control 2026-11-17
+retry after trusted-head-id workflow merge
